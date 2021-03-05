@@ -59,9 +59,12 @@ namespace AMR {
             void mark_uniform_refinement();
             void mark_uniform_derefinement();
             void mark_error_refinement(
-              const std::vector< std::pair< edge_t, edge_tag > >& remote );
+              const std::vector< std::pair< edge_t, edge_tag > >& remote,
+              bool is_deref = false );
 
-            void mark_error_refinement_corr( const EdgeData& edges );
+            void mark_error_refinement_corr( const EdgeData& edges,
+              bool is_deref = false );
+
             int detect_compatibility(
                     int num_locked_edges,
                     int num_intermediate_edges,

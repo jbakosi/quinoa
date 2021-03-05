@@ -248,15 +248,17 @@ Refiner::flatcoord( const tk::UnsMesh::CoordMap& coordmap )
 void
 Refiner::dtref( const std::map< int, std::vector< std::size_t > >& bface,
                 const std::map< int, std::vector< std::size_t > >& bnode,
-                const std::vector< std::size_t >& triinpoel )
+                const std::vector< std::size_t >& triinpoel,
+                RefMode mode )
 // *****************************************************************************
 // Start mesh refinement (during time stepping, t>0)
 //! \param[in] bface Boundary-faces mapped to side set ids
 //! \param[in] bnode Boundary-node lists mapped to side set ids
 //! \param[in] triinpoel Boundary-face connectivity
+//! \param[in] mode Refinement mode
 // *****************************************************************************
 {
-  m_mode = RefMode::DTREF;
+  m_mode = mode;
 
   // Update boundary node lists
   m_bface = bface;
@@ -521,6 +523,13 @@ Refiner::refine()
     else
       errorRefine();
 
+  } else if (m_mode == RefMode::DTDEREF) {
+
+    if (g_inputdeck.get< tag::amr, tag::dtref_uniform >())
+      uniformDeRefine();
+    else
+      errorRefine(RefMode::DTDEREF);
+
   } else if (m_mode == RefMode::OUTREF) {
 
     uniformRefine();
@@ -672,7 +681,12 @@ Refiner::correctref()
 
   if (!extra.empty()) {
     // Do refinement including edges that need to be corrected
-    m_refiner.mark_error_refinement_corr( extra );
+    if (m_mode == RefMode::DTDEREF) {
+      m_refiner.mark_error_refinement_corr( extra, true );
+    }
+    else {
+      m_refiner.mark_error_refinement_corr( extra );
+    }
     // Update our extra-edge store based on refiner
     updateEdgeData();
   }
@@ -893,10 +907,12 @@ Refiner::perform()
         m_refiner.perform_refinement();
     }
 
-  } else {
-
-    // TODO: does not work yet, fix as above
+  }
+  // TODO: dtref is not completely tested yet; verify that the following works
+  else if (m_mode == RefMode::DTDEREF) {
     m_refiner.perform_derefinement();
+  }
+  else {
     m_refiner.perform_refinement();
   }
 
@@ -957,6 +973,13 @@ Refiner::next()
       }
     }
 
+    // Follow up with a dt-derefinement step
+    dtref( m_outref_bface, m_outref_bnode, m_outref_triinpoel,
+           RefMode::DTDEREF );
+
+  } else if (m_mode == RefMode::DTDEREF) {
+
+    //TODO: Is the above chunk of code "Augment node communication map ..." needed here as well?
     // Send new mesh, solution, and communication data back to PDE worker
     m_scheme[m_meshid].ckLocal< Scheme::resizePostAMR >( thisIndex,  m_ginpoel,
       m_el, m_coord, m_addedNodes, m_addedTets, m_nodeCommMap, m_bface, m_bnode,
@@ -1147,7 +1170,7 @@ Refiner::solution( std::size_t npoin,
     // Evaluate initial conditions at mesh nodes
     u = nodeinit( npoin, esup );
 
-  } else if (m_mode == RefMode::DTREF) {
+  } else if (m_mode == RefMode::DTREF || m_mode == RefMode::DTDEREF) {
 
     // Query current solution
     u = m_scheme[m_meshid].ckLocal< Scheme::solution >( thisIndex );
@@ -1174,9 +1197,10 @@ Refiner::solution( std::size_t npoin,
 }
 
 void
-Refiner::errorRefine()
+Refiner::errorRefine(RefMode mode)
 // *****************************************************************************
-// Do error-based mesh refinement and derefinement
+// Do error-based mesh refinement or derefinement, as specified by ref-mode
+//! \param[in] mode Refinement mode, defaults to RefMode::DTREF if unspecified
 // *****************************************************************************
 {
   // Find number of nodes in old mesh
@@ -1198,17 +1222,23 @@ Refiner::errorRefine()
   auto tolderef = g_inputdeck.get< tag::amr, tag::tolderef >();
   std::vector< std::pair< edge_t, edge_tag > > tagged_edges;
   for (const auto& e : errorsInEdges(npoin,esup,u)) {
-    if (e.second > tolref) {
+    if (mode == RefMode::DTREF && e.second > tolref) {
       tagged_edges.push_back( { edge_t( m_rid[e.first[0]], m_rid[e.first[1]] ),
                                 edge_tag::REFINE } );
-    } else if (e.second < tolderef) {
+    } else if (mode == RefMode::DTDEREF && e.second < tolderef) {
+      //TODO: be able to uncomment following code
       //tagged_edges.push_back( { edge_t( m_rid[e.first[0]], m_rid[e.first[1]] ),
       //                          edge_tag::DEREFINE } );
     }
   }
 
   // Do error-based refinement
-  m_refiner.mark_error_refinement( tagged_edges );
+  if (mode == RefMode::DTREF) {
+    m_refiner.mark_error_refinement( tagged_edges );
+  }
+  else if (mode == RefMode::DTDEREF) {
+    m_refiner.mark_error_refinement( tagged_edges, true );
+  }
 
   // Update our extra-edge store based on refiner
   updateEdgeData();

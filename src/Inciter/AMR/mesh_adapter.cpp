@@ -216,9 +216,12 @@ namespace AMR {
      * refinement
      *
      * @param remote Vector of edges and edge tags
+     * @param is_deref True if error-based derefinement is required; default is
+     *   is false, i.e. error-based refinement
      */
     void mesh_adapter_t::mark_error_refinement(
-            const std::vector< std::pair< edge_t, edge_tag > >& remote )
+            const std::vector< std::pair< edge_t, edge_tag > >& remote,
+            bool is_deref )
     {
        for (const auto& r : remote) {
          auto& local = tet_store.edge_store.get( r.first );
@@ -237,11 +240,16 @@ namespace AMR {
          }
        }
 
-       mark_refinement();
-       mark_derefinement();
+       if (is_deref) {
+         mark_derefinement();
+       }
+       else {
+         mark_refinement();
+       }
     }
 
-   void mesh_adapter_t::mark_error_refinement_corr( const EdgeData& edges )
+   void mesh_adapter_t::mark_error_refinement_corr( const EdgeData& edges,
+     bool is_deref )
     {
        for (const auto& r : edges)
        {
@@ -250,7 +258,13 @@ namespace AMR {
            assert(edgeref.lock_case <= r.second.second);
            edgeref.lock_case = r.second.second;
        }
-       mark_refinement();
+
+       if (is_deref) {
+         mark_derefinement();
+       }
+       else {
+         mark_refinement();
+       }
     }
 
     /**

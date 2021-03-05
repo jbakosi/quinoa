@@ -774,7 +774,8 @@ Transporter::matched( std::size_t summeshid,
       }
       m_progMesh.inc< REFINE >( print );
 
-    } else if (refmode == Refiner::RefMode::DTREF) {
+    } else if (refmode == Refiner::RefMode::DTREF ||
+        refmode == Refiner::RefMode::DTDEREF) {
 
       auto dtref_uni = g_inputdeck.get< tag::amr, tag::dtref_uniform >();
       print.diag( { "meshid", "dtref", "type", "nref", "nderef", "ncorr" },

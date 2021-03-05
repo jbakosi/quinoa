@@ -69,7 +69,8 @@ class Refiner : public CBase_Refiner {
       T0REF = 1,        //!< Initial (t<0) refinement
       DTREF,            //!< During time stepping (t>0)
       OUTREF,           //!< Refinement for field output
-      OUTDEREF };       //!< De-refinement after field output
+      OUTDEREF,         //!< De-refinement after field output
+      DTDEREF };        //!< De-refinement during time stepping (t>0)
 
     //! Constructor
     explicit Refiner( std::size_t meshid,
@@ -121,7 +122,8 @@ class Refiner : public CBase_Refiner {
     //! Start mesh refinement (during time stepping, t>0)
     void dtref( const std::map< int, std::vector< std::size_t > >& bface,
                 const std::map< int, std::vector< std::size_t > >& bnode,
-                const std::vector< std::size_t >& triinpoel );
+                const std::vector< std::size_t >& triinpoel,
+                RefMode mode = RefMode::DTREF );
 
     //! Start mesh refinement (for field output)
     void outref( const std::map< int, std::vector< std::size_t > >& bface,
@@ -377,7 +379,7 @@ class Refiner : public CBase_Refiner {
     void uniformDeRefine();
 
     //! Do error-based mesh refinement
-    void errorRefine();
+    void errorRefine(RefMode mode = RefMode::DTREF);
 
     //! Compute errors in edges
     EdgeError
