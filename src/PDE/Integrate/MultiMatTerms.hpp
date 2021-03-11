@@ -76,6 +76,15 @@ pressureRelaxationInt( ncomp_t system,
                        Fields& R,
                        int intsharp );
 
+//! Compute volume change due to pressure relaxation in the multi-material PDEs
+std::vector< real >
+getRelaxationVolumeChange(ncomp_t system,
+  std::size_t ncomp,
+  std::size_t nmat,
+  const tk::real ct,
+  const tk::real dx,
+  const std::vector< real >& state);
+
 //! Update the rhs by adding the pressure relaxation integrals
 void
 updateRhsPre(

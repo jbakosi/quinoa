@@ -422,21 +422,8 @@ class MultiMat {
           }
         }
 
-        // 2. Based on volume change in majority material, compute energy change
-        //auto gmax =
-        //  g_inputdeck.get< tag::param, eq, tag::gamma >()[ m_system ][kmax];
-        //auto pmax_new = pmax * std::pow(almax/(almax+d_al), gmax);
-        //auto rhomax_new = unk(e, densityDofIdx(nmat, kmax, rdof, 0), m_offset)
-        //  / (almax+d_al);
-        //auto rhoEmax_new = eos_totalenergy< eq >(m_system, rhomax_new, u, v, w,
-        //  pmax_new, kmax);
-        //auto d_arEmax_new = (almax+d_al) * rhoEmax_new
-        //  - unk(e, energyDofIdx(nmat, kmax, rdof, 0), m_offset);
-
+        // 2. Flux energy/volume change into majority material
         unk(e, volfracDofIdx(nmat, kmax, rdof, 0), m_offset) += d_al;
-        //unk(e, energyDofIdx(nmat, kmax, rdof, 0), m_offset) += d_arEmax_new;
-
-        // 2. Flux energy change into majority material
         unk(e, energyDofIdx(nmat, kmax, rdof, 0), m_offset) += d_arE;
         prim(e, pressureDofIdx(nmat, kmax, rdof, 0), m_offset) =
           eos_pressure< eq >(m_system,
@@ -882,6 +869,8 @@ class MultiMat {
       const auto rdof = g_inputdeck.get< tag::discr, tag::rdof >();
       const auto nmat =
         g_inputdeck.get< tag::param, tag::multimat, tag::nmat >()[m_system];
+      const auto ct = g_inputdeck.get< tag::param, tag::multimat,
+        tag::prelax_timescale >()[m_system];
 
       const auto& esuf = fd.Esuf();
 
@@ -972,7 +961,27 @@ class MultiMat {
       // compute allowable dt
       for (std::size_t e=0; e<nielem; ++e)
       {
-        mindt = std::min( mindt, geoElem(e,0,0)/delt[e] );
+        // get state
+        std::vector< tk::real > B(rdof, 0.0);
+        B[0] = 1.0;
+        ugp = eval_state( m_ncomp, m_offset, rdof, ndof, e, U, B);
+        pgp = eval_state( nprim(), m_offset, rdof, ndof, e, P, B);
+        auto state = ugp;
+        state.insert(state.end(), pgp.begin(), pgp.end());
+
+        // pressure relaxation volume change
+        auto s_alpha = tk::getRelaxationVolumeChange(m_system, m_ncomp, nmat,
+          ct, geoElem(e,4,0)/2.0, state);
+
+        tk::real t_pr = std::numeric_limits< tk::real >::max();
+        //for (std::size_t k=0; k<nmat; ++k)
+        //{
+        //  if (volfracIdx(nmat, k) > 1.0e-04)
+        //    t_pr = std::min(t_pr,
+        //      0.05*state[volfracIdx(nmat, k)]/(std::fabs(s_alpha[k])+1e-12));
+        //}
+
+        mindt = std::min( mindt, std::min(geoElem(e,0,0)/delt[e], t_pr) );
       }
 
       tk::real dgp = 0.0;

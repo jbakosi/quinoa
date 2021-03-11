@@ -390,43 +390,79 @@ pressureRelaxationInt( ncomp_t system,
         {{coordgp[0][igp], coordgp[1][igp], coordgp[2][igp]}}, B, U, P);
 
       // get bulk properties
-      real rhob(0.0);
-      for (std::size_t k=0; k<nmat; ++k)
-        rhob += state[densityIdx(nmat, k)];
-
-      // get pressures and bulk modulii
-      real pb(0.0), nume(0.0), deno(0.0), trelax(0.0);
-      std::vector< real > apmat(nmat, 0.0), kmat(nmat, 0.0);
+      real rhob(0.0), pb(0.0);
       for (std::size_t k=0; k<nmat; ++k)
       {
-        real arhomat = state[densityIdx(nmat, k)];
-        real alphamat = state[volfracIdx(nmat, k)];
-        apmat[k] = state[ncomp+pressureIdx(nmat, k)];
-        real amat = inciter::eos_soundspeed< tag::multimat >( system, arhomat,
-          apmat[k], alphamat, k );
-        kmat[k] = arhomat * amat * amat;
-        pb += apmat[k];
-
-        // relaxation parameters
-        trelax = std::max(trelax, ct*dx/amat);
-        nume += alphamat * apmat[k] / kmat[k];
-        deno += alphamat * alphamat / kmat[k];
+        rhob += state[densityIdx(nmat, k)];
+        pb += state[ncomp+pressureIdx(nmat, k)];
       }
-      auto p_relax = nume/deno;
+
+      auto s_alpha = getRelaxationVolumeChange(system, ncomp, nmat, ct, dx, state);
 
       // compute pressure relaxation terms
       std::vector< real > s_prelax(ncomp, 0.0);
       for (std::size_t k=0; k<nmat; ++k)
       {
-        auto s_alpha = (apmat[k]-p_relax*state[volfracIdx(nmat, k)])
-          * (state[volfracIdx(nmat, k)]/kmat[k]) / trelax;
-        s_prelax[volfracIdx(nmat, k)] = s_alpha;
-        s_prelax[energyIdx(nmat, k)] = - pb*s_alpha;
+        s_prelax[volfracIdx(nmat, k)] = s_alpha[k];
+        s_prelax[energyIdx(nmat, k)] = - pb*s_alpha[k];
       }
 
       updateRhsPre( ncomp, offset, ndof, dof_el, wt, e, B, s_prelax, R );
     }
   }
+}
+
+std::vector< real >
+getRelaxationVolumeChange(ncomp_t system,
+  std::size_t ncomp,
+  std::size_t nmat,
+  const tk::real ct,
+  const tk::real dx,
+  const std::vector< real >& state)
+// *****************************************************************************
+//  Compute volume change due to pressure relaxation in the multi-material PDEs
+//! \param[in] system Equation system index
+//! \param[in] ncomp Number of components in this PDE sysstem
+//! \param[in] nmat Number of materials in this PDE system
+//! \param[in] ct Pressure relaxation time-scale for this system
+//! \param[in] dx length scale for this cell
+//! \param[in] state Solution state
+//! \return Volume change associated with the pressure relaxation
+// *****************************************************************************
+{
+  using inciter::densityIdx;
+  using inciter::volfracIdx;
+  using inciter::pressureIdx;
+
+  // get pressures and bulk modulii
+  real nume(0.0), deno(0.0), trelax(0.0);
+  std::vector< real > apmat(nmat, 0.0), kmat(nmat, 0.0);
+  for (std::size_t k=0; k<nmat; ++k)
+  {
+    real arhomat = state[densityIdx(nmat, k)];
+    real alphamat = state[volfracIdx(nmat, k)];
+    apmat[k] = state[ncomp+pressureIdx(nmat, k)];
+    real amat = inciter::eos_soundspeed< tag::multimat >( system, arhomat,
+      apmat[k], alphamat, k );
+    kmat[k] = arhomat * amat * amat;
+
+    // relaxation parameters
+    trelax = std::max(trelax, ct*dx/amat);
+    nume += alphamat * apmat[k] / kmat[k];
+    deno += alphamat * alphamat / kmat[k];
+  }
+  auto p_relax = nume/deno;
+
+  // compute pressure relaxation volume change terms
+  std::vector< real > s_prelax(nmat, 0.0);
+  for (std::size_t k=0; k<nmat; ++k)
+  {
+    auto s_alpha = (apmat[k]-p_relax*state[volfracIdx(nmat, k)])
+      * (state[volfracIdx(nmat, k)]/kmat[k]) / trelax;
+    s_prelax[k] = s_alpha;
+  }
+
+  return s_prelax;
 }
 
 void
