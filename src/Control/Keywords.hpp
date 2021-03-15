@@ -5516,16 +5516,18 @@ using id = keyword< id_info, TAOCPP_PEGTL_STRING("id") >;
 struct prelax_info {
   static std::string name() { return "Pressure relaxation"; }
   static std::string shortDescription() { return
-    "Turn multi-material finite pressure relaxation on/off"; }
+    "Select multi-material pressure relaxation"; }
   static std::string longDescription() { return
-    R"(This keyword is used to turn finite pressure relaxation between multiple
-       materials on/off. It is used only for the multi-material solver, and has
-       no effect when used for the other PDE types.)";
+    R"(This keyword is used to select pressure relaxation between multiple
+       materials. A value of 1 is used to specify finite-rate pressure
+       relaxation, and a value of 2 to specify instantaneous pressure
+       relaxation. It is used only for the multi-material solver, and has no
+       effect when used for the other PDE types.)";
   }
   struct expect {
     using type = int;
     static std::string description() { return "string"; }
-    static std::string choices() { return "1 | 0"; }
+    static std::string choices() { return "1 | 2 | 0"; }
   };
 };
 using prelax = keyword< prelax_info, TAOCPP_PEGTL_STRING("prelax") >;
@@ -5539,7 +5541,8 @@ struct prelax_timescale_info {
        relaxation between multiple materials occurs. The default value of 1.0
        corresponds to a relaxation time of the order of time required for a
        sound wave to pass through a computational element. It is used only for
-       multimat, and has no effect for the other PDE types.)";
+       multimat when finite-rate pressure relaxation is selected, and has no
+       effect for the other PDE types.)";
   }
   struct expect {
     using type = tk::real;

@@ -84,14 +84,19 @@ infoMultiMat( std::map< ctr::PDEType, tk::ctr::ncomp_t >& cnt )
   nfo.emplace_back( "number of materials", std::to_string( nmat ) );
 
   auto prelax = g_inputdeck.get< tag::param, eq, tag::prelax >()[c];
-  nfo.emplace_back( "finite pressure relaxation", std::to_string( prelax ) );
+  nfo.emplace_back( "pressure relaxation", std::to_string( prelax ) );
 
-  if (prelax)
+  if (prelax == 1)
   {
     auto prelax_ts =
       g_inputdeck.get< tag::param, eq, tag::prelax_timescale >()[c];
     nfo.emplace_back( "pressure relaxation time-scale",
                       std::to_string( prelax_ts ) );
+  }
+  else if (prelax == 2)
+  {
+    nfo.emplace_back( "instantaneous pressure relaxation",
+      std::to_string(prelax) );
   }
 
   auto intsharp = g_inputdeck.get< tag::param, eq, tag::intsharp >()[c];

@@ -20,6 +20,11 @@
 #include <unordered_set>
 #include <map>
 #include <array>
+#ifdef HAS_MKL
+  #include <mkl_lapacke.h>
+#else
+  #include <lapacke.h>
+#endif
 
 #include "Macro.hpp"
 #include "Exception.hpp"
@@ -292,6 +297,8 @@ class MultiMat {
       const auto rdof = g_inputdeck.get< tag::discr, tag::rdof >();
       const auto nmat =
         g_inputdeck.get< tag::param, tag::multimat, tag::nmat >()[m_system];
+      const auto prelax =
+        g_inputdeck.get< tag::param, tag::multimat, tag::prelax >()[m_system];
 
       Assert( unk.nunk() == prim.nunk(), "Number of unknowns in solution "
               "vector and primitive vector at recent time step incorrect" );
@@ -338,154 +345,180 @@ class MultiMat {
           unk(e, densityDofIdx(nmat, kmax, rdof, 0), m_offset), u, v, w,
           unk(e, energyDofIdx(nmat, kmax, rdof, 0), m_offset), almax, kmax);
 
-        tk::real p_target(0.0), d_al(0.0), d_arE(0.0);
-        //// get equilibrium pressure
-        //std::vector< tk::real > kmat(nmat, 0.0);
-        //tk::real ratio(0.0);
-        //for (std::size_t k=0; k<nmat; ++k)
-        //{
-        //  auto arhok = unk(e, densityDofIdx(nmat,k,rdof,0), m_offset);
-        //  auto alk = unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset);
-        //  auto apk = prim(e, pressureDofIdx(nmat,k,rdof,0), m_offset);
-        //  auto ak = eos_soundspeed< eq >(m_system, arhok, apk, alk, k );
-        //  kmat[k] = arhok * ak * ak;
-
-        //  p_target += alk * apk / kmat[k];
-        //  ratio += alk * alk / kmat[k];
-        //}
-        //p_target /= ratio;
-        //p_target = std::max(p_target, 1e-14);
-        p_target = std::max(pmax, 1e-14);
-
-        // 1. Correct minority materials and store volume/energy changes
-        for (std::size_t k=0; k<nmat; ++k)
+        // instantaneous pressure relaxation
+        if (prelax == 2)
         {
-          auto alk = unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset);
-          auto pk = prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) / alk;
-          auto Pck =
-            g_inputdeck.get< tag::param, eq, tag::pstiff >()[ m_system ][k];
-          // for positive volume fractions
-          if (alk > 0.0)
+          // 0. get equilibrium pressure: needs solution to a nonlinear equation
+          auto equilVector = getEquilPressure(nmat, e, rdof, unk, prim);
+
+          // 1. Correct volume fractions of materials
+          for (std::size_t k=0; k<nmat; ++k)
           {
-            // check if volume fraction is lesser than threshold (al_eps) and
-            // if the material (effective) pressure is negative. If either of
-            // these conditions is true, perform pressure relaxation.
-            if ((alk < al_eps) || (pk+Pck < 0.0)/*&& (std::fabs((pk-pmax)/pmax) > 1e-08)*/)
-            {
-              //auto gk =
-              //  g_inputdeck.get< tag::param, eq, tag::gamma >()[ m_system ][k];
+            //auto alk = unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset);
+            //auto pk = prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) / alk;
+            //// check if volume fraction is lesser than threshold (al_eps) and
+            //// if the material (effective) pressure is negative. If either of
+            //// these conditions is true, perform pressure relaxation.
+            //if ((alk < al_eps) || (pk+Pck < 0.0))
+            //{
+              auto alk_new = unk(e, densityDofIdx(nmat,k,rdof,0), m_offset) /
+                equilVector[k];
 
-              tk::real alk_new(0.0);
-              //// volume change based on polytropic expansion/isentropic compression
-              //if (pk > p_target)
-              //{
-              //  alk_new = std::pow((pk/p_target), (1.0/gk)) * alk;
-              //}
-              //else
-              //{
-              //  auto arhok = unk(e, densityDofIdx(nmat, k, rdof, 0), m_offset);
-              //  auto ck = eos_soundspeed< eq >(m_system, arhok, alk*pk, alk, k);
-              //  auto kk = arhok * ck * ck;
-              //  alk_new = alk - (alk*alk/kk) * (p_target-pk);
-              //}
-              alk_new = alk;
-
-              // energy change
-              auto rhomat = unk(e, densityDofIdx(nmat, k, rdof, 0), m_offset)
-                / alk_new;
-              auto rhoEmat = eos_totalenergy< eq >(m_system, rhomat, u, v, w,
-                p_target, k);
-
-              // volume-fraction and total energy flux into majority material
-              d_al += (alk - alk_new);
-              d_arE += (unk(e, energyDofIdx(nmat, k, rdof, 0), m_offset)
-                - alk_new * rhoEmat);
-
-              // update state of trace material
+              // update volume fraction
               unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset) = alk_new;
-              unk(e, energyDofIdx(nmat, k, rdof, 0), m_offset) = alk_new*rhoEmat;
-              prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) = alk_new*p_target;
+            //}
+          }
+
+          // bulk quantities
+          auto rhoEb(0.0), rhob(0.0), volb(0.0);
+          for (std::size_t k=0; k<nmat; ++k)
+          {
+            rhoEb += unk(e, energyDofIdx(nmat,k,rdof,0), m_offset);
+            volb += unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset);
+            rhob += unk(e, densityDofIdx(nmat,k,rdof,0), m_offset);
+          }
+
+          // 2. find mixture-pressure
+          tk::real pmix(0.0), den(0.0);
+          pmix = (rhoEb - 0.5*rhob*(u*u+v*v+w*w))/volb;
+          for (std::size_t k=0; k<nmat; ++k)
+          {
+            auto gk =
+              g_inputdeck.get< tag::param, eq, tag::gamma >()[ m_system ][k];
+            auto Pck =
+              g_inputdeck.get< tag::param, eq, tag::pstiff >()[ m_system ][k];
+
+            pmix -= unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset) / volb * gk
+              * Pck / (gk-1.0);
+            den += unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset) / volb
+              / (gk-1.0);
+          }
+          pmix /= den;
+
+          // 3. correct energies
+          for (std::size_t k=0; k<nmat; ++k)
+          {
+            auto alk_new = unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset);
+            auto rhomat = unk(e, densityDofIdx(nmat,k,rdof,0), m_offset)
+              / alk_new;
+            unk(e, energyDofIdx(nmat,k,rdof,0), m_offset) = alk_new *
+              eos_totalenergy< eq >(m_system, rhomat, u, v, w, pmix, k);
+            prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) = alk_new * pmix;
+          }
+
+          pmax = pmix;
+        }
+        // finite-rate pressure relaxation fixes
+        else
+        {
+          tk::real p_target(0.0), d_al(0.0), d_arE(0.0);
+          //// get equilibrium pressure
+          //std::vector< tk::real > kmat(nmat, 0.0);
+          //tk::real ratio(0.0);
+          //for (std::size_t k=0; k<nmat; ++k)
+          //{
+          //  auto arhok = unk(e, densityDofIdx(nmat,k,rdof,0), m_offset);
+          //  auto alk = unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset);
+          //  auto apk = prim(e, pressureDofIdx(nmat,k,rdof,0), m_offset);
+          //  auto ak = eos_soundspeed< eq >(m_system, arhok, apk, alk, k );
+          //  kmat[k] = arhok * ak * ak;
+
+          //  p_target += alk * apk / kmat[k];
+          //  ratio += alk * alk / kmat[k];
+          //}
+          //p_target /= ratio;
+          //p_target = std::max(p_target, 1e-14);
+          p_target = std::max(pmax, 1e-14);
+
+          // 1. Correct minority materials and store volume/energy changes
+          for (std::size_t k=0; k<nmat; ++k)
+          {
+            auto alk = unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset);
+            auto pk = prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) / alk;
+            auto Pck =
+              g_inputdeck.get< tag::param, eq, tag::pstiff >()[ m_system ][k];
+            // for positive volume fractions
+            if (alk > 0.0)
+            {
+              // check if volume fraction is lesser than threshold (al_eps) and
+              // if the material (effective) pressure is negative. If either of
+              // these conditions is true, perform pressure relaxation.
+              if ((alk < al_eps) || (pk+Pck < 0.0)/*&& (std::fabs((pk-pmax)/pmax) > 1e-08)*/)
+              {
+                //auto gk =
+                //  g_inputdeck.get< tag::param, eq, tag::gamma >()[ m_system ][k];
+
+                tk::real alk_new(0.0);
+                //// volume change based on polytropic expansion/isentropic compression
+                //if (pk > p_target)
+                //{
+                //  alk_new = std::pow((pk/p_target), (1.0/gk)) * alk;
+                //}
+                //else
+                //{
+                //  auto arhok = unk(e, densityDofIdx(nmat, k, rdof, 0), m_offset);
+                //  auto ck = eos_soundspeed< eq >(m_system, arhok, alk*pk, alk, k);
+                //  auto kk = arhok * ck * ck;
+                //  alk_new = alk - (alk*alk/kk) * (p_target-pk);
+                //}
+                alk_new = alk;
+
+                // energy change
+                auto rhomat = unk(e, densityDofIdx(nmat, k, rdof, 0), m_offset)
+                  / alk_new;
+                auto rhoEmat = eos_totalenergy< eq >(m_system, rhomat, u, v, w,
+                  p_target, k);
+
+                // volume-fraction and total energy flux into majority material
+                d_al += (alk - alk_new);
+                d_arE += (unk(e, energyDofIdx(nmat, k, rdof, 0), m_offset)
+                  - alk_new * rhoEmat);
+
+                // update state of trace material
+                unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset) = alk_new;
+                unk(e, energyDofIdx(nmat, k, rdof, 0), m_offset) = alk_new*rhoEmat;
+                prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) = alk_new*p_target;
+              }
+            }
+            // check for unbounded volume fractions
+            else if (alk < 0.0)
+            {
+              auto rhok = eos_density< eq >(m_system, p_target, tmax, k);
+              d_al += (alk - 1e-14);
+              // update state of trace material
+              unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset) = 1e-14;
+              unk(e, densityDofIdx(nmat, k, rdof, 0), m_offset) = 1e-14 * rhok;
+              unk(e, energyDofIdx(nmat, k, rdof, 0), m_offset) = 1e-14
+                * eos_totalenergy< eq >(m_system, rhok, u, v, w, p_target, k);
+              prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) = 1e-14 *
+                p_target;
             }
           }
-          // check for unbounded volume fractions
-          else if (alk < 0.0)
-          {
-            auto rhok = eos_density< eq >(m_system, p_target, tmax, k);
-            d_al += (alk - 1e-14);
-            // update state of trace material
-            unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset) = 1e-14;
-            unk(e, densityDofIdx(nmat, k, rdof, 0), m_offset) = 1e-14 * rhok;
-            unk(e, energyDofIdx(nmat, k, rdof, 0), m_offset) = 1e-14
-              * eos_totalenergy< eq >(m_system, rhok, u, v, w, p_target, k);
-            prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) = 1e-14 *
-              p_target;
+
+          // 2. Flux energy/volume change into majority material
+          unk(e, volfracDofIdx(nmat, kmax, rdof, 0), m_offset) += d_al;
+          unk(e, energyDofIdx(nmat, kmax, rdof, 0), m_offset) += d_arE;
+          prim(e, pressureDofIdx(nmat, kmax, rdof, 0), m_offset) =
+            eos_pressure< eq >(m_system,
+            unk(e, densityDofIdx(nmat, kmax, rdof, 0), m_offset), u, v, w,
+            unk(e, energyDofIdx(nmat, kmax, rdof, 0), m_offset),
+            unk(e, volfracDofIdx(nmat, kmax, rdof, 0), m_offset), kmax);
+
+          // enforce unit sum of volume fractions
+          auto alsum = 0.0;
+          for (std::size_t k=0; k<nmat; ++k)
+            alsum += unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset);
+
+          for (std::size_t k=0; k<nmat; ++k) {
+            unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset) /= alsum;
+            unk(e, densityDofIdx(nmat, k, rdof, 0), m_offset) /= alsum;
+            unk(e, energyDofIdx(nmat, k, rdof, 0), m_offset) /= alsum;
+            prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) /= alsum;
           }
+
+          pmax = prim(e, pressureDofIdx(nmat, kmax, rdof, 0), m_offset) /
+            unk(e, volfracDofIdx(nmat, kmax, rdof, 0), m_offset);
         }
-
-        // 2. Flux energy/volume change into majority material
-        unk(e, volfracDofIdx(nmat, kmax, rdof, 0), m_offset) += d_al;
-        unk(e, energyDofIdx(nmat, kmax, rdof, 0), m_offset) += d_arE;
-        prim(e, pressureDofIdx(nmat, kmax, rdof, 0), m_offset) =
-          eos_pressure< eq >(m_system,
-          unk(e, densityDofIdx(nmat, kmax, rdof, 0), m_offset), u, v, w,
-          unk(e, energyDofIdx(nmat, kmax, rdof, 0), m_offset),
-          unk(e, volfracDofIdx(nmat, kmax, rdof, 0), m_offset), kmax);
-
-        // enforce unit sum of volume fractions
-        auto alsum = 0.0;
-        for (std::size_t k=0; k<nmat; ++k)
-          alsum += unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset);
-
-        for (std::size_t k=0; k<nmat; ++k) {
-          unk(e, volfracDofIdx(nmat, k, rdof, 0), m_offset) /= alsum;
-          unk(e, densityDofIdx(nmat, k, rdof, 0), m_offset) /= alsum;
-          unk(e, energyDofIdx(nmat, k, rdof, 0), m_offset) /= alsum;
-          prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) /= alsum;
-        }
-
-        //// bulk quantities
-        //auto rhoEb(0.0), rhob(0.0), volb(0.0);
-        //for (std::size_t k=0; k<nmat; ++k)
-        //{
-        //  if (relaxInd[k] > 0.0)
-        //  {
-        //    rhoEb += unk(e, energyDofIdx(nmat,k,rdof,0), m_offset);
-        //    volb += unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset);
-        //    rhob += unk(e, densityDofIdx(nmat,k,rdof,0), m_offset);
-        //  }
-        //}
-
-        //// 2. find mixture-pressure
-        //tk::real pmix(0.0), den(0.0);
-        //pmix = rhoEb - 0.5*rhob*(u*u+v*v+w*w);
-        //for (std::size_t k=0; k<nmat; ++k)
-        //{
-        //  auto gk =
-        //    g_inputdeck.get< tag::param, eq, tag::gamma >()[ m_system ][k];
-        //  auto Pck =
-        //    g_inputdeck.get< tag::param, eq, tag::pstiff >()[ m_system ][k];
-
-        //  pmix -= unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset) * gk * Pck *
-        //    relaxInd[k] / (gk-1.0);
-        //  den += unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset) * relaxInd[k]
-        //    / (gk-1.0);
-        //}
-        //pmix /= den;
-
-        //// 3. correct energies
-        //for (std::size_t k=0; k<nmat; ++k)
-        //{
-        //  if (relaxInd[k] > 0.0)
-        //  {
-        //    auto alk_new = unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset);
-        //    unk(e, energyDofIdx(nmat,k,rdof,0), m_offset) = alk_new *
-        //      eos_totalenergy< eq >(m_system, rhomat[k], u, v, w, pmix, k);
-        //    prim(e, pressureDofIdx(nmat, k, rdof, 0), m_offset) = alk_new * pmix;
-        //  }
-        //}
-
-        pmax = prim(e, pressureDofIdx(nmat, kmax, rdof, 0), m_offset) /
-          unk(e, volfracDofIdx(nmat, kmax, rdof, 0), m_offset);
 
         // check for unphysical state
         for (std::size_t k=0; k<nmat; ++k)
@@ -518,6 +551,129 @@ class MultiMat {
       }
 
       if (neg_density) Throw("Negative partial density.");
+    }
+
+    //! Compute equilibrium pressure and densities after pressure relaxation
+    //! \param[in] nmat Number of materials
+    //! \param[in] e Element id
+    //! \param[in] rdof Total number of dofs
+    //! \param[in] unk Array of unknowns
+    //! \param[in] prim Array of primitives
+    //! \return Solution vector for nonlinear relaxation system
+    std::vector< tk::real > getEquilPressure(
+      std::size_t nmat,
+      std::size_t e,
+      std::size_t rdof,
+      const tk::Fields& unk,
+      const tk::Fields& prim) const
+    {
+      // 1. Get interface pressure
+      tk::real p_int(0.0), deno(0.0), pb(0.0);
+      for (std::size_t k=0; k<nmat; ++k)
+      {
+        auto azk = unk(e, densityDofIdx(nmat,k,rdof,0), m_offset) *
+          eos_soundspeed< eq >(m_system,
+          unk(e, densityDofIdx(nmat,k,rdof,0), m_offset),
+          prim(e, pressureDofIdx(nmat,k,rdof,0), m_offset),
+          unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset), k );
+        p_int += prim(e, pressureDofIdx(nmat,k,rdof,0), m_offset) / azk;
+        deno += unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset) / azk;
+        pb += prim(e, pressureDofIdx(nmat,k,rdof,0), m_offset);
+      }
+      p_int /= deno;
+
+      auto u = prim(e, velocityDofIdx(nmat,0,rdof,0), m_offset);
+      auto v = prim(e, velocityDofIdx(nmat,1,rdof,0), m_offset);
+      auto w = prim(e, velocityDofIdx(nmat,2,rdof,0), m_offset);
+
+      // 2. assemble system matrix and rhs: most of the system matrix does not
+      // need to be updated during the Newton iterations
+      lapack_int nm = nmat+1;
+      double A_r[nm*nm], b_r[nm];
+      std::vector< tk::real > u_r(nm, 0.0);
+
+      // initialize matrices
+      for (std::size_t i=0; i<nm; ++i)
+      {
+        for (std::size_t j=0; j<nm; ++j) A_r[nm*i+j] = 0.0;
+        b_r[i] = 0.0;
+      }
+
+      for (std::size_t k=0; k<nmat; ++k)
+      {
+        // diagonal entry
+        std::size_t i = nm*k+k;
+        A_r[i] = (unk(e, energyDofIdx(nmat,k,rdof,0), m_offset) /
+          unk(e, densityDofIdx(nmat,k,rdof,0), m_offset) -
+          0.5*tk::dot({{u, v, w}}, {{u, v, w}}))
+          + (p_int / (unk(e, densityDofIdx(nmat,k,rdof,0), m_offset) /
+            unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset)));
+        // end column
+        i = nm*k+nm-1;
+        auto gk = g_inputdeck.get< tag::param, eq, tag::gamma >()[ m_system ][k];
+        A_r[i] = -1.0 / (gk-1.0);
+        // end row needs to be updated during iterations
+        // rhs vector needs to be updated during iterations
+        // solution vector
+        u_r[k] = unk(e, densityDofIdx(nmat,k,rdof,0), m_offset) /
+          unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset);
+      }
+      u_r[nm-1] = p_int;
+
+      // 3. solve system for mat-densities and equil. pressure
+      // Newton iteration for nonlinear system
+      for (std::size_t iter=0; iter<50; ++iter)
+      {
+        //std::cout << e << ": Newton-it " << iter << std::endl;
+        //std::cout << e << "    " << p_int << std::endl;
+        // update system matrix and rhs entries according to recent iteration
+        b_r[nm-1] = 1.0;
+        for (std::size_t k=0; k<nmat; ++k)
+        {
+          //std::cout << e << "(" << k << "): " << std::setprecision(18) << u_r[k] << std::endl;
+          //std::cout << "      " << std::setprecision(18) << "arho="
+          //  << unk(e, densityDofIdx(nmat,k,rdof,0), m_offset) << " alpha="
+          //  << unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset) << std::endl;
+          // end row needs to be updated during iterations
+          std::size_t i = nm*(nm-1)+k;
+          A_r[i] = -unk(e, densityDofIdx(nmat,k,rdof,0), m_offset)
+            / (u_r[k]*u_r[k]);
+          // rhs vector needs to be updated during iterations
+          i = k;
+          auto gk =
+            g_inputdeck.get< tag::param, eq, tag::gamma >()[ m_system ][k];
+          auto Pck =
+            g_inputdeck.get< tag::param, eq, tag::pstiff >()[ m_system ][k];
+          auto e0k_p_pint = (unk(e, energyDofIdx(nmat,k,rdof,0), m_offset) /
+            unk(e, densityDofIdx(nmat,k,rdof,0), m_offset) -
+            0.5*tk::dot({{u, v, w}}, {{u, v, w}}))
+            + (p_int / (unk(e, densityDofIdx(nmat,k,rdof,0), m_offset) /
+              unk(e, volfracDofIdx(nmat,k,rdof,0), m_offset)));
+          b_r[i] = -(e0k_p_pint*u_r[k] - 1.0/(gk-1.0)*u_r[nm-1] -
+            (gk*Pck)/(gk-1.0) - p_int);
+          b_r[nm-1] -= unk(e, densityDofIdx(nmat,k,rdof,0), m_offset)/u_r[k];
+        }
+
+        lapack_int IPIV[nm];
+        lapack_int info =
+          LAPACKE_dgesv(LAPACK_ROW_MAJOR, nm, 1, A_r, nm, IPIV, b_r, 1);
+        ErrChk(info==0, "Relaxation equation system diverged at iteration " +
+          std::to_string(iter) + " for element " + std::to_string(e));
+
+        // update solution vector
+        tk::real l2u(0.0), l2b(0.0);
+        for (std::size_t i=0; i<nm; ++i)
+        {
+          u_r[i] += b_r[i];
+          l2u += u_r[i]*u_r[i];
+          l2b += b_r[i]*b_r[i];
+        }
+
+        // convergence
+        if (l2b/l2u < 1.0e-6) break;
+      }
+
+      return u_r;
     }
 
     //! Reconstruct second-order solution from first-order
@@ -831,7 +987,8 @@ class MultiMat {
                               vriempoly, ndofel, R, intsharp );
 
       // compute finite pressure relaxation terms
-      if (g_inputdeck.get< tag::param, tag::multimat, tag::prelax >()[m_system])
+      if (g_inputdeck.get< tag::param, tag::multimat, tag::prelax >()[m_system]
+        == 1)
       {
         const auto ct = g_inputdeck.get< tag::param, tag::multimat,
                                          tag::prelax_timescale >()[m_system];
